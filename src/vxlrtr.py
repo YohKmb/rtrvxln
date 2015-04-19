@@ -18,11 +18,12 @@ import sys
 
 # from scapy.data import *
 from scapy.fields import ByteField, BitField
-from scapy.layers.inet import IP, Ether, Packet, ARP
+from scapy.layers.inet import IP, Ether, Packet, ARP, ICMP, icmptypes
 from scapy.data import ETHER_TYPES, IP_PROTOS
 
 from scapy.arch import get_if_hwaddr
 from scapy.arch.linux import get_if_list
+# from ryu.app.rest_router import ICMP
 
 
 PORT_DST_VXLAN = 4789
@@ -127,17 +128,19 @@ class PduProcessor(Process):
                         map_in = self.maps[vni_in]
             
                         if e_type == ETHER_TYPES.ARP:
-                            self.arp_reply(pdu, vni_in, map_in, endp_ip)
+                            self._arp_reply(pdu, map_in, endp_ip)
                         
                         elif e_type == ETHER_TYPES.IPv4:
-                            debug_info("IP arrived.", 1)
+#                             debug_info("IP arrived.", 1)
 
                             if pdu[IP_Stop].dst != map_in["gw_ip"]:
+                                debug_info("A packet to be routed arrived.", 1)
                                 # Routing process
                                 pass
+                            
                             elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
                                 # Act like forwarding to loopback address
-                                pass
+                                self._icmp_reply()
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
             #             print "Pid = " + str(current_process().pid) + " took timestamp of " + msg
                     except EOFError as _excpt:
@@ -159,14 +162,14 @@ class PduProcessor(Process):
             sys.exit(1)
 
 
-    def arp_reply(self, pdu, vni_in, map_in, endp_ip):
+    def _arp_reply(self, pdu, map_in, endp_ip):
         
         debug_info("ARP arrived.", 1)
         arp_in = pdu[ARP_Stop]
 #         arp_in.show()
     #                 arp_targ = pdu[ARP_Stop].psdt
         if arp_in.pdst == str( map_in["gw_ip"] ):
-            rep = Vxlan(vni=vni_in)/Ether(src=map_in["hwaddr"], \
+            rep = Vxlan(vni=map_in["vni"])/Ether(src=map_in["hwaddr"], \
                                         dst=arp_in.hwsrc)/ \
                                     ARP(op=ARP.is_at, hwdst=arp_in.hwsrc, \
                                         hwsrc=map_in["hwaddr"], pdst=arp_in.psrc, \
@@ -175,11 +178,17 @@ class PduProcessor(Process):
             self.sock.sendto(str(rep), (endp_ip, map_in["vteps"][endp_ip]) )
     
     
-    def icmp_reply(self):
-        
-        debug_info("ICMP arrived.", 1)
+    def _icmp_reply(self, pdu, map_in, endp_ip):
 
-        pass
+        debug_info("ICMP echo to GW arrived.", 1)
+        icmp_in = pdu[IP_Stop][ICMP]
+        
+        if icmptypes[icmp_in.type] == "echo-request" \
+            and pdu[IP_Stop].dst == map_in["gw_ip"]:
+            
+            pass
+
+#         pass
 
 
     def lookup_l3cache(self):
