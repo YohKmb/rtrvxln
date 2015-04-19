@@ -41,56 +41,55 @@ class RouterVxlan (object):
         pass
 
 
+class IP_Stop(IP):
+    
+    def dissect(self, s):
+        s = self.pre_dissect(s)
+        s = self.do_dissect(s)
+        s = self.post_dissect(s)
+        
+        payl,_pad = self.extract_padding(s)
+        self.add_payload(payl)
+
+
+class ARP_Stop(ARP):
+    
+    def dissect(self, s):
+        s = self.pre_dissect(s)
+        s = self.do_dissect(s)
+        s = self.post_dissect(s)
+        
+        payl,_pad = self.extract_padding(s)
+        self.add_payload(payl)
+
+
+class Ether_Stop(Ether):
+    
+    def __init__(self, _pkt="", post_transform=None, _internal=0, _underlayer=None, **fields):
+#         Ether.__init__(self, _pkt, post_transform, _internal, _underlayer)
+        super(Ether_Stop, self).__init__(_pkt, post_transform, _internal, _underlayer)
+        
+    payload_guess = [
+                     ({'type': 2054}, ARP_Stop),
+                     ({'type': 2048}, IP_Stop)
+                    ]
+
+
+class Vxlan (Packet):
+    
+    name = "Vxlan Packet"
+
+    payload_guess = [({'flag' : 8}, Ether_Stop)]
+    fields_desc = [
+                   ByteField("flag", 8),
+                   BitField("reserved_pre", 0, 24),
+                   BitField("vni", 1, 24),
+                   BitField("reserved_post", 0, 8)
+                   ]
+
+
 class PduProcessor(Process):
 
-    
-    class IP_Stop(IP):
-        
-        def dissect(self, s):
-            s = self.pre_dissect(s)
-            s = self.do_dissect(s)
-            s = self.post_dissect(s)
-            
-            payl,_pad = self.extract_padding(s)
-            self.add_payload(payl)
-    
-    
-    class ARP_Stop(ARP):
-        
-        def dissect(self, s):
-            s = self.pre_dissect(s)
-            s = self.do_dissect(s)
-            s = self.post_dissect(s)
-            
-            payl,_pad = self.extract_padding(s)
-            self.add_payload(payl)
-    
-    
-    class Ether_Stop(Ether):
-        
-        def __init__(self, _pkt="", post_transform=None, _internal=0, _underlayer=None, **fields):
-    #         Ether.__init__(self, _pkt, post_transform, _internal, _underlayer)
-            super(PduProcessor.Ether_Stop, self).__init__(_pkt, post_transform, _internal, _underlayer)
-            
-        payload_guess = [
-                         ({'type': 2054}, PduProcessor.ARP_Stop),
-                         ({'type': 2048}, PduProcessor.IP_Stop)
-                        ]
-    
-    
-    class Vxlan (Packet):
-        
-        name = "Vxlan Packet"
-    
-        payload_guess = [({'flag' : 8}, Ether_Stop)]
-        fields_desc = [
-                       ByteField("flag", 8),
-                       BitField("reserved_pre", 0, 24),
-                       BitField("vni", 1, 24),
-                       BitField("reserved_post", 0, 8)
-                       ]
-
-    
     def __init__(self, pipes, maps):
         super(PduProcessor, self).__init__()
         
@@ -108,8 +107,6 @@ class PduProcessor(Process):
         conn_r, conn_s = self.pipes
         conn_s.close()
         
-#         l3cache = {}
-        
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM) ) \
                 as self.sock:
@@ -122,10 +119,10 @@ class PduProcessor(Process):
     
                         print(str(endp) )
             #             hexdump(udp_data)
-                        pdu = PduProcessor.Vxlan(udp_data)
+                        pdu = Vxlan(udp_data)
             #             pdu.show()
-                        e_type = pdu[PduProcessor.Ether_Stop].type
-                        vni_in = pdu[PduProcessor.Vxlan].vni
+                        e_type = pdu[Ether_Stop].type
+                        vni_in = pdu[Vxlan].vni
                         
                         map_in = self.maps[vni_in]
             
@@ -135,10 +132,10 @@ class PduProcessor(Process):
                         elif e_type == ETHER_TYPES.IPv4:
                             debug_info("IP arrived.", 1)
 
-                            if pdu[PduProcessor.IP_Stop].dst != map_in["gw_ip"]:
+                            if pdu[IP_Stop].dst != map_in["gw_ip"]:
                                 # Routing process
                                 pass
-                            elif pdu[PduProcessor.IP_Stop].proto == IP_PROTOS.icmp:
+                            elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
                                 # Act like forwarding to loopback address
                                 pass
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
@@ -165,11 +162,11 @@ class PduProcessor(Process):
     def arp_reply(self, pdu, vni_in, map_in, endp_ip):
         
         debug_info("ARP arrived.", 1)
-        arp_in = pdu[PduProcessor.ARP_Stop]
+        arp_in = pdu[ARP_Stop]
 #         arp_in.show()
     #                 arp_targ = pdu[ARP_Stop].psdt
         if arp_in.pdst == str( map_in["gw_ip"] ):
-            rep = PduProcessor.Vxlan(vni=vni_in)/Ether(src=map_in["hwaddr"], \
+            rep = Vxlan(vni=vni_in)/Ether(src=map_in["hwaddr"], \
                                         dst=arp_in.hwsrc)/ \
                                     ARP(op=ARP.is_at, hwdst=arp_in.hwsrc, \
                                         hwsrc=map_in["hwaddr"], pdst=arp_in.psrc, \
