@@ -73,8 +73,8 @@ class PduProcessor(Process):
             super(PduProcessor.Ether_Stop, self).__init__(_pkt, post_transform, _internal, _underlayer)
             
         payload_guess = [
-                         ({'type': 2054}, ARP_Stop),
-                         ({'type': 2048}, IP_Stop)
+                         ({'type': 2054}, PduProcessor.ARP_Stop),
+                         ({'type': 2048}, PduProcessor.IP_Stop)
                         ]
     
     
