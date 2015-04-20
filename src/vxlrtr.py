@@ -18,7 +18,7 @@ import sys
 
 # from scapy.data import *
 from scapy.fields import ByteField, BitField
-from scapy.layers.inet import IP, Ether, Packet, ARP, ICMP, icmptypes
+from scapy.layers.inet import Packet, IP, Ether, ARP, ICMP, icmptypes, Raw
 from scapy.data import ETHER_TYPES, IP_PROTOS
 
 from scapy.arch import get_if_hwaddr
@@ -51,6 +51,9 @@ class IP_Stop(IP):
         
         payl,_pad = self.extract_padding(s)
         self.add_payload(payl)
+        
+        if self.proto == IP_PROTOS.icmp:
+            self.decode_payload_as(ICMP)
 
 
 class ARP_Stop(ARP):
@@ -133,14 +136,17 @@ class PduProcessor(Process):
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
 
-                            if pdu[IP_Stop].dst != map_in["gw_ip"]:
+                            if pdu[IP_Stop].dst != str(map_in["gw_ip"]):
                                 debug_info("A packet to be routed arrived.", 1)
+#                                 debug_info("dst = {0}, gw = {1}, cmp = {2}".format( \
+#                                                 str(pdu[IP_Stop].dst), map_in["gw_ip"],
+#                                                 str(pdu[IP_Stop].dst) == map_in["gw_ip"]), 2)
                                 # Routing process
                                 pass
                             
                             elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
                                 # Act like forwarding to loopback address
-                                self._icmp_reply()
+                                self._icmp_reply(pdu, map_in, endp_ip)
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
             #             print "Pid = " + str(current_process().pid) + " took timestamp of " + msg
                     except EOFError as _excpt:
@@ -182,11 +188,22 @@ class PduProcessor(Process):
 
         debug_info("ICMP echo to GW arrived.", 1)
         icmp_in = pdu[IP_Stop][ICMP]
+#         icmp_in.show()
         
         if icmptypes[icmp_in.type] == "echo-request" \
-            and pdu[IP_Stop].dst == map_in["gw_ip"]:
+            and pdu[IP_Stop].dst == str(map_in["gw_ip"]):
             
-            pass
+#             eth_in = pdu[Ether_Stop]
+            
+            rep = Vxlan(vni=map_in["vni"])/Ether(src=map_in["hwaddr"], \
+                                        dst=pdu[Ether_Stop].src)/ \
+                                    IP(dst=pdu[IP_Stop].src, src=pdu[IP_Stop].dst)/ \
+                                    ICMP(type=0, id=icmp_in.id, seq=icmp_in.seq)/icmp_in[Raw]
+#                                     ICMP(type=0, id=icmp_in.id, seq=icmp_in.seq)
+#                                     Raw("0" * 32)
+            
+#             rep.show2()
+            self.sock.sendto(str(rep), (endp_ip, map_in["vteps"][endp_ip]) )
 
 #         pass
 
