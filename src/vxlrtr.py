@@ -103,7 +103,7 @@ class PduProcessor(Process):
     
     def run(self):
 
-        debug_info("{0} starts.".format(current_process().name),2)
+        debug_info("{0} starts. : pid = {1}".format(current_process().name, current_process().pid ),2)
         
         conn_r, conn_s = self.pipes
         conn_s.close()
@@ -206,8 +206,8 @@ def server_loop(srcip, lport, maps):
 #             sock_rcv.listen(BUFFLEN_RECV)
             
             procs = []
-#             n_proc = min(cpu_count(), 8)
-            n_proc = 1
+            n_proc = min(cpu_count(), 8)
+#             n_proc = 1
             
             conn_q = deque()
             
