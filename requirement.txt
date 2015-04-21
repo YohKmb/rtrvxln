@@ -1,0 +1,5 @@
+# Please install `pip install <required>` if it's not installed.
+
+- scapy
+- enum34
+

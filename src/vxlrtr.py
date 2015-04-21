@@ -6,7 +6,9 @@
 
 
 from multiprocessing import Process, Pipe, cpu_count, current_process
-from collections import deque
+from collections import deque, defaultdict
+from enum import Enum
+# from enum34 import import Enum
 
 from contextlib import closing
 import socket
@@ -17,16 +19,18 @@ from netaddr import IPAddress, IPNetwork, smallest_matching_cidr
 import sys
 
 # from scapy.data import *
-from scapy.fields import ByteField, BitField
-from scapy.layers.inet import Packet, IP, Ether, ARP, ICMP, icmptypes, Raw
+from scapy.fields import ByteField, BitField, IPField
+from scapy.layers.inet import Packet, IP, Ether, ARP, ICMP, icmptypes, Raw, Emph
 from scapy.data import ETHER_TYPES, IP_PROTOS
 
-from scapy.arch import get_if_hwaddr
-from scapy.arch.linux import get_if_list
+from scapy.arch import get_if_hwaddr, linux
+# from scapy.arch.linux import get_if_list
 # from ryu.app.rest_router import ICMP
 
 
 PORT_DST_VXLAN = 4789
+PORT_BIND_CACHE = 54789
+
 ADDRESS_BIND = ""
 
 BUFFLEN_RECV = 10
@@ -40,6 +44,10 @@ class RouterVxlan (object):
     
     def __init__ (self):
         pass
+
+
+class ActionCode(Enum):
+        flood = 0x00
 
 
 class IP_Stop(IP):
@@ -92,12 +100,21 @@ class Vxlan (Packet):
                    ]
 
 
+class MsgStruct(Packet):
+    
+    fields_desc = [
+                   Emph(IPField("host", "127.0.0.1")),
+                   Emph(IPField("vtep", "127.0.0.1"))
+                   ]
+
+
 class PduProcessor(Process):
 
     def __init__(self, pipes, maps):
+
         super(PduProcessor, self).__init__()
         
-#         self.conn_r, self.conn_s = pipes
+        self.daemon = True
         self.pipes = pipes
         self.maps = maps
         
@@ -113,8 +130,8 @@ class PduProcessor(Process):
         
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM) ) \
-                as self.sock:
-            #     while True:
+                    as self.sock:
+                
                 while conn_r.poll() != None:
                     try:
     #                     udp_data= conn_r.recv()
@@ -212,7 +229,42 @@ class PduProcessor(Process):
         pass
 
 
-def server_loop(srcip, lport, maps):
+class L3CacheServer(Process):
+    
+    def __init__(self, port):
+        super(L3CacheServer, self).__init__()
+
+        self.daemon = True
+        self.port = port
+        
+        self.l3cache = defaultdict(ActionCode.flood)
+
+    def run(self):
+        try:
+            with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM) ) as \
+                    self.sock:
+                
+                self.sock.bind( ("", self.port) )
+            
+                try:   
+                    while True:
+                        msg, proc = self.sock.recvfrom(BITELEN_RECV)
+                
+                except KeyboardInterrupt as excpt:
+                    debug_info("Keyboard Interrupt occur. Program will exit.", 3)
+                    sys.exit(0)
+                
+                except Exception as excpt:
+                    debug_info("Encontered an unknown error!", 3)
+                    print excpt
+                    sys.exit(1)
+
+        except socket.error as excpt:
+            print(excpt)
+            sys.exit(1)
+
+
+def server_loop(srcip, lport, cache, maps):
     
     try:
         print(str(maps) )
@@ -239,7 +291,7 @@ def server_loop(srcip, lport, maps):
                 
                 for c in xrange(n_proc):
                     p = procs[c]
-                    p.daemon = True
+#                     p.daemon = True
 #                     debug_info("{0} starts.".format(p.name),2)
                     p.start()
                     conn_q[c][0].close()
@@ -296,7 +348,6 @@ def hexdump(src, length=16):
 def is_valid_ipv4(ipv4):
 
     res = True
-
     try:
         a, b, c, d = map(lambda x: int(x), ipv4.split('.'))
         if (a < 0 or a > 255 or b < 0 or b > 255 or c < 0 or c > 255 or d < 0 or d > 255):
@@ -310,7 +361,6 @@ def is_valid_ipv4(ipv4):
 def is_valid_vni(vni):
     
     res = True
-
     try:
         if 0 >= vni or vni >= 2 ** 24:
             res = False
@@ -327,6 +377,7 @@ def get_parser():
     
     parser.add_argument("-l", "--lport", dest="lport", type=int, required=False, default=PORT_DST_VXLAN)
     parser.add_argument("-s", "--srcip", dest="srcip", type=str, required=False, default=ADDRESS_BIND)
+    parser.add_argument("--cache", dest="cache", type=int, required=False, default=PORT_BIND_CACHE)
     parser.add_argument("-c", "--config", dest="config", type=str, required=True)
    
     return parser
@@ -334,7 +385,7 @@ def get_parser():
 
 def parse_config(filepath):
     
-    mac_base_int = int(get_if_hwaddr(get_if_list()[0]).replace(":", ""), 16)
+    mac_base_int = int(get_if_hwaddr(linux.get_if_list()[0]).replace(":", ""), 16)
 #     mac_base_int = [int(sec, 16) for sec in get_if_hwaddr().split(":")]
     attrs_valid = set(["vni", "subnet", "gw_ip", "vteps"])
 #     attrs_valid = set(["vlan", "vni", "subnet", "gw_ip"])
@@ -374,6 +425,7 @@ def parse_config(filepath):
 
 
 def main ():
+    
     parser = get_parser()
     args = parser.parse_args()
     
