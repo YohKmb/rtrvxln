@@ -7,8 +7,10 @@
 
 from multiprocessing import Process, Pipe, cpu_count, current_process
 from collections import deque, defaultdict
-from enum import Enum
-from datetime import time
+from enum import Enum, IntEnum
+# from enum import IntEnum
+import time
+# from datetime import time
 # from datetime import datetime, timedelta as tdelta
 # from enum34 import import Enum
 
@@ -35,8 +37,10 @@ from random import randint
 
 PORT_DST_VXLAN = 4789
 PORT_BIND_CACHE = 54789
+
 TIMEOUT_L3CACHE = 300
 TIMEOUT_RECV_CACHE = 0.05
+INTERVAL_REFRESH = 50
 
 ADDRESS_BIND = ""
 
@@ -59,7 +63,7 @@ class ActionCode(Enum):
     arp = 0x01
 
 
-class MsgCode(Enum):
+class MsgCode(IntEnum):
     set = 0x00
     get = 0x01
 
@@ -125,7 +129,8 @@ class L3CacheMsg(Packet):
                    Emph(IPField("vtep", "0.0.0.0")),
                    FixedPointField("timeout", 0.0, 64, 32)
                    ]
-
+# L3CacheMsg().show()
+# print len(L3CacheMsg() )
 LEN_MSGSTRUCT = len(L3CacheMsg() )
 
 
@@ -177,6 +182,7 @@ class PduProcessor(Process):
             
                         if e_type == ETHER_TYPES.ARP:
                             self._arp_reply(pdu, map_in, endp_ip)
+                            self._regist_l3cache(vni_in, pdu[ARP_Stop].psrc, endp_ip)
                         
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
@@ -251,10 +257,15 @@ class PduProcessor(Process):
     def _regist_l3cache(self, vni, host, endp_ip):
         
         tout = time.time() + TIMEOUT_L3CACHE
-        self.l3cache[(vni, host)] = (endp_ip, tout)
+        self.l3cache[(int(vni), host)] = (endp_ip, tout)
 
-        msg = L3CacheMsg(code=MsgCode.set, vni=vni, vtep=endp_ip, timeout=tout)
+        msg = L3CacheMsg(code=MsgCode.set, vni=vni, host=host, \
+                            vtep=endp_ip, timeout=tout)
+        
         self.sock.sendto(str(msg), ('127.0.0.1', PORT_BIND_CACHE) )
+        
+        debug_info("local cache was updated : {0}".format( \
+                                                str(self.l3cache) ), 2)
 
 
     def _lookup_l3cache(self, vni, pdu):
@@ -264,13 +275,19 @@ class PduProcessor(Process):
         if vtep is None:
             self._query_remote_cache(vni, pdu)
         
-        elif tout <= time.time(): 
-            # the cache is already expired
-            del self.l3cache[(vni, pdu[IP_Stop].dst)]
-#             self._query_remote_cache(vni, pdu)
-            vtep = ActionCode.arp
-            tout = 0.0
-
+        else:
+            ts = time.time()
+            
+            if tout <= ts: 
+                del self.l3cache[(vni, pdu[IP_Stop].dst)]
+    #             self._query_remote_cache(vni, pdu)
+                vtep = ActionCode.arp
+                tout = 0.0
+            
+            elif tout <= ts + INTERVAL_REFRESH:
+                self._regist_l3cache(vni, pdu[IP_Stop].dst, vtep)
+#                 ts = ts + TIMEOUT_L3CACHE
+#                 self.l3cache[(vni, pdu[IP_Stop].dst)] = (vtep, ts)
         # a valid local cache was found
         return (vtep, tout)
 
@@ -309,12 +326,13 @@ class L3CacheServer(Process):
         
         self.l3cache = defaultdict(lambda: (ActionCode.flood, 0.0) )
 #         self.set_cache_timeout()
-
 #     def set_cache_timeout(self, secs=300):
 #         self.intvl_tout = secs
 # #         self.timeout = tdelta(seconds=secs)
 
     def run(self):
+
+        debug_info("{0} starts. : pid = {1}".format(current_process().name, current_process().pid ),2)
         
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM) ) as \
@@ -331,6 +349,9 @@ class L3CacheServer(Process):
                             # process set message
                             self.l3cache[(msg.vni, msg.host)] = (msg.vtep, msg.timeout)
                             
+                            debug_info("remote cache was updated : {0}".format( \
+                                                            str(self.l3cache) ), 2)
+                            
                         else:
                             # process query request
                             vtep, tout = self.l3cache[(msg.vni, msg.host)]
@@ -343,6 +364,8 @@ class L3CacheServer(Process):
                             rep = L3CacheMsg(code=MsgCode.set, vni=msg.vni, host=msg.host, 
                                             vtep=vtep, timeout=tout)
                             self.sock.sendto(str(rep), proc)
+                            
+                            debug_info("replyed : {0}".format(rep), 2)
                             
                 
                 except KeyboardInterrupt as excpt:
@@ -391,6 +414,9 @@ def server_loop(srcip, lport, cache, maps):
 #                     debug_info("{0} starts.".format(p.name),2)
                     p.start()
                     conn_q[c][0].close()
+                
+                srv_cache = L3CacheServer(cache)
+                srv_cache.start()
             
             except Exception as excpt:
                 print(excpt)
