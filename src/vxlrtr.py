@@ -145,7 +145,7 @@ class PduProcessor(Process):
         self.maps = maps
         
 #         self.l3cache = {}
-        self.l3cache = defaultdict(lambda: (None, None))
+        self.l3cache = defaultdict(lambda: (None, None, None))
 #         self.set_cache_timeout()
 #     
 # 
@@ -182,16 +182,22 @@ class PduProcessor(Process):
             
                         if e_type == ETHER_TYPES.ARP:
                             self._arp_reply(pdu, map_in, endp_ip)
-                            self._regist_l3cache(vni_in, pdu[ARP_Stop].psrc, endp_ip)
+                            
+                            ip_src = pdu[ARP_Stop].psrc
+                            if not ip_src in self.l3cache:
+                                self._regist_l3cache(vni_in, ip_src, endp_ip)
                         
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
-                            ip_dst = pdu[IP_Stop].dst
+                            ip_src, ip_dst = pdu[IP_Stop].src, pdu[IP_Stop].dst
+                            if not ip_src in self.l3cache:
+                                self._regist_l3cache(vni_in, ip_src, endp_ip)
+                            
                             if ip_dst != str(map_in["gw_ip"]):
 #                             if pdu[IP_Stop].dst != str(map_in["gw_ip"]):
                                 debug_info("A packet to be routed arrived.", 1)
                                 
-#                                 vtep_dst, tout = self._lookup_l3cache(vni, pdu)
+                                vni, vtep_dst, tout = self._lookup_l3cache(ip_dst)
                                 vni_dst = self._lookup_longest_subnet(ip_dst)
 #                                 debug_info("dst = {0}, gw = {1}, cmp = {2}".format( \
 #                                                 str(pdu[IP_Stop].dst), map_in["gw_ip"],
@@ -259,11 +265,12 @@ class PduProcessor(Process):
 #         pass
 
     def _regist_l3cache(self, vni, host, endp_ip):
-        
+#         vni_c, host_c, tout_c = self.l3cache[host]
         tout = time.time() + TIMEOUT_L3CACHE
-        self.l3cache[(int(vni), host)] = (endp_ip, tout)
+        self.l3cache[host] = (int(vni), endp_ip, tout) 
+#         self.l3cache[(int(vni), host)] = (endp_ip, tout)
 
-        msg = L3CacheMsg(code=MsgCode.set, vni=vni, host=host, \
+        msg = L3CacheMsg(code=MsgCode.set, vni=int(vni), host=host, \
                             vtep=endp_ip, timeout=tout)
         
         self.sock.sendto(str(msg), ('127.0.0.1', PORT_BIND_CACHE) )
@@ -293,37 +300,39 @@ class PduProcessor(Process):
         pass
 
 
-    def _lookup_l3cache(self, vni, pdu):
+    def _lookup_l3cache(self, ip_dst):
         
-        vtep, tout = self.l3cache[(vni, pdu[IP_Stop].dst)]
+        vni, vtep, tout = self.l3cache[ip_dst]
+#         vtep, tout = self.l3cache[(vni, pdu[IP_Stop].dst)]
         
         if vtep is None:
             debug_info("No local l3cache was found.", 1)
-            vtep, tout = self._query_remote_cache(vni, pdu)
+            vni, vtep, tout = self._query_remote_cache(ip_dst)
         
         else:
             ts = time.time()
             
             if tout <= ts: 
-                del self.l3cache[(vni, pdu[IP_Stop].dst)]
+                del self.l3cache[ip_dst]
     #             self._query_remote_cache(vni, pdu)
-                vtep, tout = (ActionCode.arp, None)
+                vni, vtep, tout = (None, ActionCode.arp, None)
 #                 tout = 0.0
             
             elif tout <= ts + INTERVAL_REFRESH:
-                self._regist_l3cache(vni, pdu[IP_Stop].dst, vtep)
+                self._regist_l3cache(vni, ip_dst, vtep)
 #                 ts = ts + TIMEOUT_L3CACHE
 #                 self.l3cache[(vni, pdu[IP_Stop].dst)] = (vtep, ts)
         # a valid local cache was found
-        return (vtep, tout)
+        return (vni, vtep, tout)
 
 
-    def _query_remote_cache(self, vni, pdu):
+    def _query_remote_cache(self, ip_dst):
         
         ref = randint(1, MAX_REFID)
-        req = L3CacheMsg(code=MsgCode.get, ref=ref, vni=vni, host=pdu[IP_Stop].dst)
+        req = L3CacheMsg(code=MsgCode.get, ref=ref, host=ip_dst)
+#         req = L3CacheMsg(code=MsgCode.get, ref=ref, vni=vni, host=ip_dst)
         
-        cache = (ActionCode.arp, None)
+        cache = (None, ActionCode.arp, None)
 #         cache = None
         try:
             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
@@ -332,9 +341,10 @@ class PduProcessor(Process):
             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
             msg = L3CacheMsg(rep)
             
-            cache = (msg.vtep, msg.timeout)
+            cache = (msg.vni, msg.vtep, msg.timeout)
 
         except socket.timeout as excpt:
+            print excpt
             debug_info("Socket timeout occurred. Fallback to ARP resolution.", 2)
 #             cache = (ActionCode.arp, None)
         return cache
@@ -371,11 +381,10 @@ class L3CacheServer(Process):
                         
                         if msg.code == MsgCode.set:
                             # process set message
-                            self.l3cache[(msg.vni, msg.host)] = (msg.vtep, msg.timeout)
-                            
-                            debug_info("remote cache was updated : {0}".format( \
-                                                            str(self.l3cache) ), 2)
-                            
+                            self._process_set(msg)
+#                             self.l3cache[(msg.vni, msg.host)] = (msg.vtep, msg.timeout)
+#                             debug_info("remote cache was updated : {0}".format( \
+#                                                             str(self.l3cache) ), 2)
                         else:
                             # process query request
                             vtep, tout = self.l3cache[(msg.vni, msg.host)]
@@ -404,6 +413,16 @@ class L3CacheServer(Process):
         except socket.error as excpt:
             print(excpt)
             sys.exit(1)
+
+
+    def _process_set(self, msg):
+        self.l3cache[msg.host] = (msg.vni, msg.vtep, msg.timeout)
+        debug_info("remote cache was updated : {0}".format( \
+                                                        str(self.l3cache) ), 2)
+
+
+    def _process_get(self, msg):
+        pass
 
 
 
