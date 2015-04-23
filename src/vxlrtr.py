@@ -186,9 +186,13 @@ class PduProcessor(Process):
                         
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
-
-                            if pdu[IP_Stop].dst != str(map_in["gw_ip"]):
+                            ip_dst = pdu[IP_Stop].dst
+                            if ip_dst != str(map_in["gw_ip"]):
+#                             if pdu[IP_Stop].dst != str(map_in["gw_ip"]):
                                 debug_info("A packet to be routed arrived.", 1)
+                                
+#                                 vtep_dst, tout = self._lookup_l3cache(vni, pdu)
+                                vni_dst = self._lookup_longest_subnet(ip_dst)
 #                                 debug_info("dst = {0}, gw = {1}, cmp = {2}".format( \
 #                                                 str(pdu[IP_Stop].dst), map_in["gw_ip"],
 #                                                 str(pdu[IP_Stop].dst) == map_in["gw_ip"]), 2)
@@ -268,12 +272,34 @@ class PduProcessor(Process):
                                                 str(self.l3cache) ), 2)
 
 
+    def _lookup_longest_subnet(self, ip_dst):
+        
+        try:
+            f1 = lambda (vni, dic): smallest_matching_cidr(ip_dst, dic["subnet"]) is not None
+            mtchs = {dic["subnet"] : vni for (vni, dic) in filter(f1, self.maps.items()) }
+            
+            if not len(mtchs):
+                debug_info("No route was matched.", 2)
+                return None
+        
+        except KeyError as excpt:
+            debug_info("Routing lookup encoutered an error : {0}".format(excpt), 3)
+            return None
+            
+        return self.maps[smallest_matching_cidr(ip_dst, mtchs.keys())]
+#         f2 = lambda (vni, dic): ()
+
+    def _arp_request(self, vni, ip_dst):
+        pass
+
+
     def _lookup_l3cache(self, vni, pdu):
         
         vtep, tout = self.l3cache[(vni, pdu[IP_Stop].dst)]
         
         if vtep is None:
-            self._query_remote_cache(vni, pdu)
+            debug_info("No local l3cache was found.", 1)
+            vtep, tout = self._query_remote_cache(vni, pdu)
         
         else:
             ts = time.time()
@@ -281,8 +307,8 @@ class PduProcessor(Process):
             if tout <= ts: 
                 del self.l3cache[(vni, pdu[IP_Stop].dst)]
     #             self._query_remote_cache(vni, pdu)
-                vtep = ActionCode.arp
-                tout = 0.0
+                vtep, tout = (ActionCode.arp, None)
+#                 tout = 0.0
             
             elif tout <= ts + INTERVAL_REFRESH:
                 self._regist_l3cache(vni, pdu[IP_Stop].dst, vtep)
@@ -297,8 +323,8 @@ class PduProcessor(Process):
         ref = randint(1, MAX_REFID)
         req = L3CacheMsg(code=MsgCode.get, ref=ref, vni=vni, host=pdu[IP_Stop].dst)
         
-        cache = None
-        
+        cache = (ActionCode.arp, None)
+#         cache = None
         try:
             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
 
@@ -310,9 +336,7 @@ class PduProcessor(Process):
 
         except socket.timeout as excpt:
             debug_info("Socket timeout occurred. Fallback to ARP resolution.", 2)
-            
-            cache = (ActionCode.arp, None)
-
+#             cache = (ActionCode.arp, None)
         return cache
 
 
