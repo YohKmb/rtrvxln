@@ -122,7 +122,8 @@ class Vxlan (Packet):
 class L3CacheMsg(Packet):
     
     fields_desc = [
-                   ByteEnumField("code", MsgCode.set, {MsgCode.set : "set",MsgCode.get : "get"}),
+                   ByteEnumField("code", MsgCode.set, {MsgCode.set : "set",MsgCode.get : "get",
+                                                       MsgCode.arp : "arp"}),
                    IntField("ref", 0),
                    IntField("vni", 1),
 #                    ByteField("code", MsgCode.set),
@@ -197,7 +198,7 @@ class PduProcessor(Process):
                             
                             if ip_dst != str(map_in["gw_ip"]):
                                 
-                                self._route_packet(ip_dst)
+                                self._route_packet(ip_dst, pdu)
 #                             if pdu[IP_Stop].dst != str(map_in["gw_ip"]):
 #                                 debug_info("A packet to be routed arrived.", 1)
 #                                 vni, vtep_dst, tout = self._lookup_l3cache(ip_dst)
@@ -231,7 +232,7 @@ class PduProcessor(Process):
             sys.exit(1)
 
 
-    def _route_packet(self, ip_dst):
+    def _route_packet(self, ip_dst, pdu):
         
         vni_dst, vtep_dst, tout = self._lookup_l3cache(ip_dst)
         
@@ -306,7 +307,8 @@ class PduProcessor(Process):
             debug_info("Routing lookup encoutered an error : {0}".format(excpt), 3)
             return None
             
-        return self.maps[smallest_matching_cidr(ip_dst, mtchs.keys())]
+        return mtchs[smallest_matching_cidr(ip_dst, mtchs.keys())]
+#         return self.maps[smallest_matching_cidr(ip_dst, mtchs.keys())]
 #         f2 = lambda (vni, dic): ()
 
     def _arp_request(self, vni, ip_dst):
@@ -387,7 +389,6 @@ class L3CacheServer(Process):
 
         debug_info("{0} starts. : pid = {1}".format(current_process().name, \
                                                     current_process().pid ), 1)
-        
         try:
             with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM) ) as \
                     self.sock:
@@ -456,9 +457,7 @@ class L3CacheServer(Process):
         rep = L3CacheMsg(code=code, vni=vni, host=msg.host, 
                         vtep=vtep, timeout=tout)
         self.sock.sendto(str(rep), client)
-        
-        debug_info("replyed : {0}".format(rep), 2)
-
+#         debug_info("replyed : {0}".format(rep), 2)
 
 
 def server_loop(srcip, lport, cache, maps):
