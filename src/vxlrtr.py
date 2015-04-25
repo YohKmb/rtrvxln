@@ -4,10 +4,15 @@
 # Copyright 2015 Yoh Kamibayashi
 #
 
+from packets import Vxlan, IP, IP_Stop, ICMP, Ether, Ether_Stop, ARP, ARP_Stop, \
+    IP_PROTO_ICMP, L3CacheMsg, LEN_MSGSTRUCT
+from utils import FifoDict
+from codes import MsgCode, ActionCode
 
 from multiprocessing import Process, Pipe, cpu_count, current_process
+from threading import Thread, Condition
+
 from collections import deque, defaultdict
-from enum import Enum, IntEnum
 # from enum import IntEnum
 import time
 # from datetime import time
@@ -23,13 +28,8 @@ from netaddr import IPAddress, IPNetwork, smallest_matching_cidr #, largest_matc
 import sys
 
 # from scapy.data import *
-from scapy.fields import ByteField, BitField, IPField, \
-    ByteEnumField, IntField
-from scapy.layers.inet import Packet, IP, Ether, ARP, ICMP, \
-    icmptypes, Raw, Emph, DestMACField
-from scapy.layers.ntp import FixedPointField
-from scapy.data import ETHER_TYPES, IP_PROTOS
-
+from scapy.layers.inet import icmptypes, Raw
+from scapy.data import ETHER_TYPES
 from scapy.arch import get_if_hwaddr, linux
 from random import randint
 # from scapy.arch.linux import get_if_list
@@ -39,106 +39,49 @@ from random import randint
 PORT_DST_VXLAN = 4789
 PORT_BIND_CACHE = 54789
 
-TIMEOUT_L3CACHE = 300
-TIMEOUT_RECV_CACHE = 0.05
-INTERVAL_REFRESH = 50
+# TIMEOUT_L3CACHE = 300
+# TIMEOUT_RECV_CACHE = 0.05
+# INTERVAL_REFRESH = 50
 
 ADDRESS_BIND = ""
 
-BUFFLEN_RECV = 10
+# LEN_PQUEUE = 50
 BITELEN_RECV = 9000
 
 MAC_MODULER = 2 ** 48
 MAX_REFID = 2 ** 24 - 1
 
 
-
-class RouterVxlan (object):
-    
-    def __init__ (self):
-        pass
-
-
-class ActionCode(Enum):
-    flood = 0x00
-    arp = 0x01
-
-
-class MsgCode(IntEnum):
-    set = 0x00
-    get = 0x01
-    arp = 0x10
-
-
-class IP_Stop(IP):
-    
-    def dissect(self, s):
-        s = self.pre_dissect(s)
-        s = self.do_dissect(s)
-        s = self.post_dissect(s)
-        
-        payl,_pad = self.extract_padding(s)
-        self.add_payload(payl)
-        
-        if self.proto == IP_PROTOS.icmp:
-            self.decode_payload_as(ICMP)
-
-
-class ARP_Stop(ARP):
-    
-    def dissect(self, s):
-        s = self.pre_dissect(s)
-        s = self.do_dissect(s)
-        s = self.post_dissect(s)
-        
-        payl,_pad = self.extract_padding(s)
-        self.add_payload(payl)
-
-
-class Ether_Stop(Ether):
-    
-    def __init__(self, _pkt="", post_transform=None, _internal=0, _underlayer=None, **fields):
-#         Ether.__init__(self, _pkt, post_transform, _internal, _underlayer)
-        super(Ether_Stop, self).__init__(_pkt, post_transform, _internal, _underlayer)
-        
-    payload_guess = [
-                     ({'type': 2054}, ARP_Stop),
-                     ({'type': 2048}, IP_Stop)
-                    ]
-
-
-class Vxlan (Packet):
-    
-    name = "Vxlan Packet"
-
-    payload_guess = [({'flag' : 8}, Ether_Stop)]
-    fields_desc = [
-                   ByteField("flag", 8),
-                   BitField("reserved_pre", 0, 24),
-                   BitField("vni", 1, 24),
-                   BitField("reserved_post", 0, 8)
-                   ]
-
-
-class L3CacheMsg(Packet):
-    
-    fields_desc = [
-                   ByteEnumField("code", MsgCode.set, {MsgCode.set : "set",MsgCode.get : "get",
-                                                       MsgCode.arp : "arp"}),
-                   IntField("ref", 0),
-                   IntField("vni", 1),
-#                    ByteField("code", MsgCode.set),
-                   Emph(IPField("host", "0.0.0.0")),
-                   DestMACField("hwaddr"),
-                   Emph(IPField("vtep", "0.0.0.0")),
-                   FixedPointField("timeout", 0.0, 64, 32)
-                   ]
-# L3CacheMsg().show()
-# print len(L3CacheMsg() )
-LEN_MSGSTRUCT = len(L3CacheMsg() )
+# class RouterVxlan (object):
+#     
+#     def __init__ (self):
+#         pass
 
 
 class PduProcessor(Process):
+    
+    TIMEOUT_L3CACHE = 300
+    TIMEOUT_RECV_CACHE = 0.05
+    INTERVAL_REFRESH = 50
+    
+    LEN_PQUEUE = 100
+
+    class ARPer(Thread):
+        
+        LEN_PQUEUE = 10
+        
+        def __init__(self, sock):
+            super(PduProcessor.ARPer, self).__init__()
+            self.daemon = True
+            
+            self.cond = Condition()
+            
+            self.p_queue = deque([], PduProcessor.ARPer.LEN_PQUEUE)
+            self.sock = sock
+            
+        def run(self):
+            pass
+
 
     def __init__(self, pipes, maps):
 
@@ -150,6 +93,9 @@ class PduProcessor(Process):
         
 #         self.l3cache = {}
         self.l3cache = defaultdict(lambda: (None, None, None, None))
+        
+        self.p_queue = deque([], PduProcessor.LEN_PQUEUE)
+        self.arpers = {}
 #         self.l3cache = defaultdict(lambda: (None, None, None))
 #         self.set_cache_timeout()
 #     
@@ -178,8 +124,12 @@ class PduProcessor(Process):
                         endp_ip, _endp_port = endp
 #                         print(str(endp) )
             #             hexdump(udp_data)
-                        pdu = Vxlan(udp_data)
-            #             pdu.show()
+                        pdu_in = Vxlan(udp_data)
+#                         try:
+                        self.p_queue.append(pdu_in)
+                        pdu = self.p_queue.popleft()
+#                         except IndexError as excpt:
+#                             print excpt
                         e_type = pdu[Ether_Stop].type
                         vni_in = pdu[Vxlan].vni
                         
@@ -195,6 +145,8 @@ class PduProcessor(Process):
 #                             ip_src, hw_src = pdu[ARP_Stop].psrc, pdu[ARP_Stop].hwsrc
                             if not ip_src in self.l3cache:
                                 self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
+                                
+                                # Then notify an arper thread.
                         
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
@@ -217,7 +169,8 @@ class PduProcessor(Process):
 #                                                 str(pdu[IP_Stop].dst) == map_in["gw_ip"]), 2)
                                 # Routing process
                             
-                            elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
+                            elif pdu[IP_Stop].proto == IP_PROTO_ICMP:
+#                             elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
                                 # Act like forwarding to loopback address
                                 self._icmp_reply(pdu, map_in, endp_ip)
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
@@ -247,11 +200,20 @@ class PduProcessor(Process):
         vni_dst, vtep_dst, hwaddr, tout = self._lookup_l3cache(ip_dst)
         
         if vtep_dst == ActionCode.arp:
-            vni_dst = self._lookup_longest_subnet(ip_dst)
-            vtep_dst = self._arp_request(vni_dst, ip_dst)
-#             debug_info("Deb point : 1", 3)
-        debug_info("route method dummy : {0}".format( \
-                                        (vni_dst, vtep_dst, hwaddr, tout) ), 2)
+#             vni_dst = self._lookup_longest_subnet(ip_dst)
+            vtep_dst = self._arp_request(ip_dst, pdu)
+        
+        else:
+            # This block assumes lookup succeeded
+            map_out = self.maps[vni_dst]
+            pdu[Vxlan].vni = vni_dst
+            pdu[Ether_Stop].dst = hwaddr
+            pdu[Ether_Stop].src = map_out["hwaddr"]
+            
+            self.sock.sendto(str(pdu), (vtep_dst, map_out["vteps"][vtep_dst]) )
+        
+#         debug_info("route method dummy : {0}".format( \
+#                                         (vni_dst, vtep_dst, hwaddr, tout) ), 2)
         
 
     def _arp_reply(self, arp_in, map_in, endp_ip):
@@ -268,15 +230,16 @@ class PduProcessor(Process):
             self.sock.sendto(str(rep), (endp_ip, map_in["vteps"][endp_ip]) )
     
     
-    def _arp_request(self, vni, ip_dst):
+    def _arp_request(self, ip_dst, pdu):
 #         debug_info("This is a stab of _arp_request method.", 2)
+        vni = self._lookup_longest_subnet(ip_dst)
         map_out = self.maps[vni]
         
         req = Vxlan(vni=vni)/Ether(src=map_out["hwaddr"], dst="ff:ff:ff:ff:ff:ff")/ \
                                 ARP(op=ARP.who_has, hwdst="00:00:00:00:00:00", \
                                     hwsrc=map_out["hwaddr"], pdst=ip_dst, \
                                     psrc=str(map_out["gw_ip"]) )
-        req.show()
+#         req.show()
         for vtep, dport in map_out["vteps"].items():
             debug_info("sendto : {0}".format( (str(vtep), dport) ), 1)
             self.sock.sendto(str(req), (str(vtep), dport) )
@@ -305,7 +268,7 @@ class PduProcessor(Process):
 
     def _regist_l3cache(self, vni, host, hwaddr, endp_ip):
 #         vni_c, host_c, tout_c = self.l3cache[host]
-        tout = time.time() + TIMEOUT_L3CACHE
+        tout = time.time() + PduProcessor.TIMEOUT_L3CACHE
         self.l3cache[host] = (int(vni), endp_ip, hwaddr, tout) 
 #         self.l3cache[(int(vni), host)] = (endp_ip, tout)
 
@@ -355,7 +318,7 @@ class PduProcessor(Process):
                 vni, vtep, hwaddr, tout = (None, ActionCode.arp, None)
 #                 tout = 0.0
             
-            elif tout <= ts + INTERVAL_REFRESH:
+            elif tout <= ts + PduProcessor.INTERVAL_REFRESH:
                 self._regist_l3cache(vni, ip_dst, hwaddr, vtep)
 #                 ts = ts + TIMEOUT_L3CACHE
 #                 self.l3cache[(vni, pdu[IP_Stop].dst)] = (vtep, ts)
@@ -375,7 +338,7 @@ class PduProcessor(Process):
         try:
             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
 
-            self.sock.settimeout(TIMEOUT_RECV_CACHE)
+            self.sock.settimeout(PduProcessor.TIMEOUT_RECV_CACHE)
             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
             msg = L3CacheMsg(rep)
             
