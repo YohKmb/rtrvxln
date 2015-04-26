@@ -26,7 +26,7 @@ import socket
 import argparse
 import json
 from netaddr import IPAddress, IPNetwork, smallest_matching_cidr #, largest_matching_cidr
-import sys
+import sys, traceback
 
 # from scapy.data import *
 from scapy.layers.inet import icmptypes, Raw
@@ -80,7 +80,7 @@ class PduProcessor(Process):
         TIMEOUT_ARPREPLY_WAIT = 1.0
         RETRY_ARPREPLY_WAIT = 3
 
-        def __init__(self, parent, req_arp, vteps):
+        def __init__(self, parent, req_arp, vteps, shdo_arp=True):
 #         def __init__(self, sock):
             
             super(PduProcessor.Arper, self).__init__()
@@ -90,6 +90,7 @@ class PduProcessor(Process):
             self._parent = parent
             self._req_arp = req_arp
             self._vteps = vteps
+            self._shdo_arp = shdo_arp
 #             self.addr_port = 
             
             self._is_cancelled = True
@@ -104,8 +105,10 @@ class PduProcessor(Process):
         def run(self):
 #             while self._is_cancelled:
             while True:
-                self._arp_request()
-                debug_info("{0} sent {1}th arp.".format(self.name, self._n_retry), 2)
+                if self._shdo_arp:
+                    self._arp_request()
+                    debug_info("{0} sent {1}th arp.".format(self.name, self._n_retry), 2)
+                    
                 self._evnt.wait(PduProcessor.Arper.TIMEOUT_ARPREPLY_WAIT)
                 
                 if self._evnt.is_set():
@@ -147,6 +150,7 @@ class PduProcessor(Process):
                 
                 
         def be_notified(self):
+            debug_info("{0} got notified !.".format(self.name), 4)
             self._evnt.set()
 #             except Full:
 #                 pass
@@ -229,11 +233,16 @@ class PduProcessor(Process):
 #                             else:
                                 # Then notify an arper thread.
                             elif arp_in.op == ARP.is_at:
+
                                 ip_src, hw_src = arp_in.psrc, arp_in.hwsrc
+                                debug_info("Got arp-reply from {0} !".format(ip_src), 4)
     #                             ip_src, hw_src = pdu[ARP_Stop].psrc, pdu[ARP_Stop].hwsrc
                                 if not ip_src in self.l3cache:
+                                    debug_info("arper is going to be notified.", 4)
                                     self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
-                                    self._arpers[ip_src].be_notified()
+#                                     debug_info("arpers = {0}".format(self._arpers), 2)
+                                    if ip_src in self._arpers:
+                                        self._arpers[ip_src].be_notified()
                                 
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
@@ -258,7 +267,6 @@ class PduProcessor(Process):
                             
                             elif pdu[IP_Stop].proto == IP_PROTO_ICMP:
 #                             elif pdu[IP_Stop].proto == IP_PROTOS.icmp:
-                                # Act like forwarding to loopback address
                                 self._icmp_reply(pdu, map_in, endp_ip)
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
             #             print "Pid = " + str(current_process().pid) + " took timestamp of " + msg
@@ -274,7 +282,8 @@ class PduProcessor(Process):
                     except Exception as excpt:
                         debug_info("{0} : Encontered an unknown error!".format( \
                                                                     current_process().name), 3)
-                        print excpt
+                        trace_exception(excpt)
+
                         sys.exit(1)
     
         except socket.error as excpt:
@@ -284,15 +293,18 @@ class PduProcessor(Process):
 
     def _route_packet(self, ip_dst, pdu):
         
-        vni_dst, vtep_dst, hwaddr, tout = self._lookup_l3cache(ip_dst)
+        vni_dst, vtep_dst, hwaddr, _tout = self._lookup_l3cache(ip_dst)
         
-        if vtep_dst == ActionCode.arp:
-            debug_info("ip_dst = {0}, arpers = {1}".format(ip_dst, self._arpers), 1)
+        if vtep_dst in ActionCode:
+#         if vtep_dst == ActionCode.arp:
+            if vtep_dst == ActionCode.arp:
+                shdo_arp = True
+            else:
+                shdo_arp = False
+#             debug_info("ip_dst = {0}, arpers = {1}".format(ip_dst, self._arpers), 1)
             if ip_dst not in self._arpers:
-                debug_info("among arp request.", 1)
-
                 req_arp, vteps = self._get_arp_targets(ip_dst, pdu)
-                arper = self.Arper(self, req_arp, vteps)
+                arper = self.Arper(self, req_arp, vteps, shdo_arp)
                 self._arpers.append(ip_dst, arper)
                 arper.start()
             
@@ -305,6 +317,8 @@ class PduProcessor(Process):
             """
             This block assumes the previous lookup ended successfully
             """
+            debug_info("packet forwarding works.", 3)
+            
             map_out = self.maps[vni_dst]
             pdu[Vxlan].vni = vni_dst
             pdu[Ether_Stop].dst = hwaddr
@@ -439,13 +453,15 @@ class PduProcessor(Process):
         cache = (None, ActionCode.arp, None, None)
 #         cache = None
         try:
-            self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
+            self.sock.sendto(str(req), ("localhost", PORT_BIND_CACHE))
+#             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
 
             self.sock.settimeout(PduProcessor.TIMEOUT_RECV_CACHE)
             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
             msg = L3CacheMsg(rep)
             
-            if msg.code != MsgCode.arp and msg.ref == ref:
+#             if msg.code != MsgCode.arp and msg.ref == ref:
+            if msg.code != MsgCode.set and msg.ref == ref:
                 cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
             
             else:
@@ -517,7 +533,8 @@ class L3CacheServer(Process):
                 
                 except Exception as excpt:
                     debug_info("Encontered an unknown error!", 3)
-                    print excpt
+                    trace_exception(excpt)
+                    
                     sys.exit(1)
 
         except socket.error as excpt:
@@ -535,6 +552,7 @@ class L3CacheServer(Process):
 #         if msg.host in self.l3cache
         code = MsgCode.set
         vni, vtep, hwaddr, tout = self.l3cache[msg.host]
+        
         if tout <= time.time():
             # remove obsolete cache
             del self.l3cache[msg.host]
@@ -712,6 +730,18 @@ def parse_config(filepath):
     except Exception as excpt:
         print excpt
         sys.exit(1)
+        
+
+def trace_exception(excpt):
+#     print excpt
+    info = sys.exc_info()
+    tbinfo = traceback.format_tb( info[2] )
+    
+    print 'Runtime error occurred !'.ljust( 80, '=' )
+    for tbi in tbinfo:
+        print tbi
+    print '  %s' % str( info[1] )
+    print '\n'.rjust( 80, '=' )
 
 
 def main ():

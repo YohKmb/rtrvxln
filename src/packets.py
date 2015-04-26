@@ -5,7 +5,7 @@
 from scapy.fields import ByteField, BitField, IPField, \
     ByteEnumField, IntField
 from scapy.layers.inet import Packet, IP, Ether, ARP, ICMP, \
-    Emph, DestMACField
+    Emph, MACField #, DestMACField
 from scapy.layers.ntp import FixedPointField
 from scapy.data import IP_PROTOS
 
@@ -73,7 +73,7 @@ class L3CacheMsg(Packet):
                    IntField("vni", 1),
 #                    ByteField("code", MsgCode.set),
                    Emph(IPField("host", "0.0.0.0")),
-                   DestMACField("hwaddr"),
+                   MACField("hwaddr", "ff:ff:ff:ff:ff:ff"),
                    Emph(IPField("vtep", "0.0.0.0")),
                    FixedPointField("timeout", 0.0, 64, 32)
                    ]
