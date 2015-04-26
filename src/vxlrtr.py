@@ -6,11 +6,11 @@
 
 from packets import Vxlan, IP, IP_Stop, ICMP, Ether, Ether_Stop, ARP, ARP_Stop, \
     IP_PROTO_ICMP, L3CacheMsg, LEN_MSGSTRUCT
-from utils import FifoDict
+from utils import FifoDict, FifoQueue
 from codes import MsgCode, ActionCode
 
 from multiprocessing import Process, Pipe, cpu_count, current_process
-from threading import Thread, Condition
+from threading import Thread, Event
 
 from collections import deque, defaultdict
 # from enum import IntEnum
@@ -57,6 +57,9 @@ MAX_REFID = 2 ** 24 - 1
 #     def __init__ (self):
 #         pass
 
+def _ondel_handler(thrd):
+    thrd.halt()
+
 
 class PduProcessor(Process):
     
@@ -66,21 +69,61 @@ class PduProcessor(Process):
     
     LEN_PQUEUE = 100
 
-    class ARPer(Thread):
+
+    class ArpRepWaiter(Thread):
         
         LEN_PQUEUE = 10
-        
-        def __init__(self, sock):
-            super(PduProcessor.ARPer, self).__init__()
+        TIMEOUT_ARPREPLY_WAIT = 1.0
+        RETRY_ARPREPLY_WAIT = 3
+
+        def __init__(self, parent, req_arp, addr_port):
+#         def __init__(self, sock):
+            
+            super(PduProcessor.ArpRepWaiter, self).__init__()
             self.daemon = True
             
-            self.cond = Condition()
+            self.evnt = Event()
+            self._parent = parent
+            self.req_arp = req_arp
+#             self.addr_port = 
             
-            self.p_queue = deque([], PduProcessor.ARPer.LEN_PQUEUE)
-            self.sock = sock
+            self._is_cancelled = True
+            self._n_retry = 0
             
+            self.p_queue = FifoQueue([], PduProcessor.ArpRepWaiter.LEN_PQUEUE)
+#             self.sock = sock
+
         def run(self):
-            pass
+#             while self._is_cancelled:
+            while True:
+                self.evnt.wait(PduProcessor.ArpRepWaiter.TIMEOUT_ARPREPLY_WAIT)
+                
+                if self.evnt.is_set():
+                    if not self._is_cancelled:
+                        """
+                        The case in which arp-reply successfully arrived
+                        """
+                        pass
+                    else:
+                        """
+                        This block is executed the thread got pushed out
+                        """
+                        pass
+                    
+                else:
+                    """
+                    This block is executed when timeout occurs
+                    """
+#                     self._parent.
+
+
+        def append_pdu(self, pdu):
+            self.p_queue.append(pdu)
+        
+        
+        def halt(self):
+            self._is_cancelled = True
+            self.evnt.set()
 
 
     def __init__(self, pipes, maps):
@@ -94,15 +137,14 @@ class PduProcessor(Process):
 #         self.l3cache = {}
         self.l3cache = defaultdict(lambda: (None, None, None, None))
         
-        self.p_queue = deque([], PduProcessor.LEN_PQUEUE)
-        self.arpers = {}
+        self.p_queue = FifoQueue([], PduProcessor.LEN_PQUEUE)
+        self.arpers = FifoDict(10, _ondel=_ondel_handler)
 #         self.l3cache = defaultdict(lambda: (None, None, None))
 #         self.set_cache_timeout()
 #     
 # 
 #     def set_cache_timeout(self, secs=300):
 #         self.intvl_tout = secs
-
    
     def run(self):
 
@@ -140,14 +182,14 @@ class PduProcessor(Process):
                             
                             if arp_in.op == ARP.who_has:
                                 self._arp_reply(arp_in, map_in, endp_ip)
-#                             pdu[ARP_Stop].show()
+#                             else:
+                                # Then notify an arper thread.
+
                             ip_src, hw_src = arp_in.psrc, arp_in.hwsrc
 #                             ip_src, hw_src = pdu[ARP_Stop].psrc, pdu[ARP_Stop].hwsrc
                             if not ip_src in self.l3cache:
                                 self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
                                 
-                                # Then notify an arper thread.
-                        
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
                             ip_src, ip_dst = pdu[IP_Stop].src, pdu[IP_Stop].dst
@@ -200,11 +242,17 @@ class PduProcessor(Process):
         vni_dst, vtep_dst, hwaddr, tout = self._lookup_l3cache(ip_dst)
         
         if vtep_dst == ActionCode.arp:
-#             vni_dst = self._lookup_longest_subnet(ip_dst)
-            vtep_dst = self._arp_request(ip_dst, pdu)
-        
+            if ip_dst in self.arpers:
+
+                req_arp, vteps = self._arp_request(ip_dst, pdu)
+                self.arpers.append(ip_dst, self.ArpRepWaiter(self, req_arp, vteps) )
+            
+            self.arpers[ip_dst].append_pdu(pdu)
+
         else:
-            # This block assumes lookup succeeded
+            """
+            This block assumes the previous lookup ended successfully
+            """
             map_out = self.maps[vni_dst]
             pdu[Vxlan].vni = vni_dst
             pdu[Ether_Stop].dst = hwaddr
@@ -243,6 +291,8 @@ class PduProcessor(Process):
         for vtep, dport in map_out["vteps"].items():
             debug_info("sendto : {0}".format( (str(vtep), dport) ), 1)
             self.sock.sendto(str(req), (str(vtep), dport) )
+        
+        return (req, map_out["vteps"].items() )
 
 
     def _icmp_reply(self, pdu, map_in, endp_ip):
