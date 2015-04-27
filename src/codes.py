@@ -15,5 +15,6 @@ class ActionCode(IntEnum):
 class MsgCode(IntEnum):
     set = 0x00
     get = 0x01
+    unset = 0x02
     arp = 0x10
     wait = 0x11

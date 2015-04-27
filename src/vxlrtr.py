@@ -5,7 +5,7 @@
 #
 
 from packets import Vxlan, IP, IP_Stop, ICMP, Ether, Ether_Stop, ARP, ARP_Stop, \
-    IP_PROTO_ICMP, L3CacheMsg, LEN_MSGSTRUCT
+    IP_PROTO_ICMP, L3CacheMsg, LEN_MSGSTRUCT, MAX_REFID
 from utils import FifoDict, FifoQueue
 from codes import MsgCode, ActionCode
 
@@ -51,7 +51,7 @@ ADDRESS_BIND = ""
 BITELEN_RECV = 9000
 
 MAC_MODULER = 2 ** 48
-MAX_REFID = 2 ** 24 - 1
+# MAX_REFID = 2 ** 24 - 1
 
 
 # class RouterVxlan (object):
@@ -235,15 +235,18 @@ class PduProcessor(Process):
                             elif arp_in.op == ARP.is_at:
 
                                 ip_src, hw_src = arp_in.psrc, arp_in.hwsrc
-                                debug_info("Got arp-reply from {0} !".format(ip_src), 4)
+                                debug_info("{0} : Got arp-reply from {1} !".format( \
+                                                                        current_process().name, ip_src), 4)
     #                             ip_src, hw_src = pdu[ARP_Stop].psrc, pdu[ARP_Stop].hwsrc
                                 if not ip_src in self.l3cache:
-                                    debug_info("arper is going to be notified.", 4)
+#                                     debug_info("arper is going to be notified.", 4)
                                     self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
+#                                     self._cancel_wait_status(ip_src)
 #                                     debug_info("arpers = {0}".format(self._arpers), 2)
-                                    if ip_src in self._arpers:
-                                        self._arpers[ip_src].be_notified()
-                                
+                                if ip_src in self._arpers:
+                                    debug_info("arper is going to be notified.", 4)
+                                    self._arpers[ip_src].be_notified()
+                            
                         elif e_type == ETHER_TYPES.IPv4:
 #                             debug_info("IP arrived.", 1)
                             ip_src, ip_dst = pdu[IP_Stop].src, pdu[IP_Stop].dst
@@ -329,7 +332,10 @@ class PduProcessor(Process):
 #         debug_info("route method dummy : {0}".format( \
 #                                         (vni_dst, vtep_dst, hwaddr, tout) ), 2)
         
-
+#     def _cancel_wait_status(self, ip):
+#         pass
+    
+    
     def _arp_reply(self, arp_in, map_in, endp_ip):
 #         debug_info("ARP arrived.", 1)
 #         arp_in = pdu[ARP_Stop]
@@ -394,8 +400,8 @@ class PduProcessor(Process):
         
         self.sock.sendto(str(msg), ('127.0.0.1', PORT_BIND_CACHE) )
         
-        debug_info("local cache was updated : {0}".format( \
-                                                str(self.l3cache) ), 2)
+        debug_info("{0} : local cache was updated : {1}".format( \
+                                            current_process().name, str(self.l3cache) ), 2)
 
 
     def _lookup_longest_subnet(self, ip_dst):
@@ -423,7 +429,8 @@ class PduProcessor(Process):
 #         vtep, tout = self.l3cache[(vni, pdu[IP_Stop].dst)]
         
         if vtep is None:
-            debug_info("No local l3cache was found.", 1)
+            debug_info("{0} : No local l3cache for {1} was found.".format( \
+                                                                current_process().name, ip_dst), 1)
             vni, vtep, hwaddr, tout = self._query_remote_cache(ip_dst)
         
         else:
@@ -453,19 +460,24 @@ class PduProcessor(Process):
         cache = (None, ActionCode.arp, None, None)
 #         cache = None
         try:
-            self.sock.sendto(str(req), ("localhost", PORT_BIND_CACHE))
+            self.sock.sendto(str(req), ("", PORT_BIND_CACHE))
 #             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
 
             self.sock.settimeout(PduProcessor.TIMEOUT_RECV_CACHE)
             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
             msg = L3CacheMsg(rep)
             
+            msg.show()
 #             if msg.code != MsgCode.arp and msg.ref == ref:
-            if msg.code != MsgCode.set and msg.ref == ref:
+            if msg.code == MsgCode.set and msg.ref == ref:
                 cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
             
+            elif msg.code == MsgCode.wait and msg.ref == ref:
+                cache = (msg.vni, ActionCode.wait, msg.hwaddr, msg.timeout)
+            
             else:
-                debug_info("No remote cache was found. Fallback to ARP resolution.", 2)
+                debug_info("{0} : No remote cache for {1} was found. " \
+                           "Fallback to ARP resolution.".format(current_process().name, ip_dst), 2)
 
 
         except socket.timeout as excpt:
@@ -483,7 +495,8 @@ class L3CacheServer(Process):
         self.daemon = True
         self.port = port
         
-        self.l3cache = defaultdict(lambda: (0, "0.0.0.0", "ff:ff:ff:ff:ff:ff", 0.0) )
+        self.l3cache = defaultdict(lambda: (-1, "0.0.0.0", "ff:ff:ff:ff:ff:ff", 0.0) )
+#         self.l3cache = defaultdict(lambda: (0, "0.0.0.0", "ff:ff:ff:ff:ff:ff", 0.0) )
 #         self.set_cache_timeout()
 #     def set_cache_timeout(self, secs=300):
 #         self.intvl_tout = secs
@@ -544,23 +557,42 @@ class L3CacheServer(Process):
 
     def _process_set(self, msg):
         self.l3cache[msg.host] = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
-        debug_info("remote cache was updated : {0}".format( \
-                                                        str(self.l3cache) ), 2)
+        debug_info("{0} : remote cache was updated : {1}".format( \
+                                                    current_process().name, str(self.l3cache) ), 2)
 
 
     def _process_get(self, msg, client):
 #         if msg.host in self.l3cache
         code = MsgCode.set
         vni, vtep, hwaddr, tout = self.l3cache[msg.host]
+        debug_info("{0}".format((vni, vtep, hwaddr, tout)), 2)
+        
         
         if tout <= time.time():
+
+            if tout != 0.0:
+                del self.l3cache[msg.host]
+                vni, vtep, hwaddr, tout = self.l3cache[msg.host]
+    
+                vni = 0
+                code = MsgCode.arp
             # remove obsolete cache
-            del self.l3cache[msg.host]
-            vni, vtep, hwaddr, tout = self.l3cache[msg.host]
-            code = MsgCode.arp
+            elif vni < 0:
+#                 del self.l3cache[msg.host]
+                vni = 0
+                self.l3cache[msg.host] = vni, vtep, hwaddr, tout
+#                 vni = 0
+                code = MsgCode.arp
+            
+            else:
+                debug_info("Sends wait message to processor.", 2)
+                code = MsgCode.wait
+#                 self.l3cache[msg.host] = (vni, vtep, hwaddr, tout)
 #             vni, vtep, tout = (0, ActionCode.arp, 0.0)
+            
+            debug_info("Msg code was set to {0}".format(code), 3)
         
-        rep = L3CacheMsg(code=code, vni=vni, host=msg.host, hwaddr=hwaddr, \
+        rep = L3CacheMsg(code=code, ref=msg.ref, vni=vni, host=msg.host, hwaddr=hwaddr, \
                         vtep=vtep, timeout=tout)
         self.sock.sendto(str(rep), client)
 #         debug_info("replyed : {0}".format(rep), 2)

@@ -12,6 +12,7 @@ from scapy.data import IP_PROTOS
 from codes import MsgCode
 
 IP_PROTO_ICMP = IP_PROTOS.icmp
+MAX_REFID = 2 ** 12
 
 
 class IP_Stop(IP):
@@ -69,7 +70,8 @@ class L3CacheMsg(Packet):
     fields_desc = [
                    ByteEnumField("code", MsgCode.set, {MsgCode.set : "set",MsgCode.get : "get",
                                                        MsgCode.arp : "arp"}),
-                   IntField("ref", 0),
+                   BitField("ref", 1, 8),
+#                    IntField("ref", 0),
                    IntField("vni", 1),
 #                    ByteField("code", MsgCode.set),
                    Emph(IPField("host", "0.0.0.0")),
