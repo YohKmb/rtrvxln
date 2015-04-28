@@ -70,8 +70,8 @@ class L3CacheMsg(Packet):
     fields_desc = [
                    ByteEnumField("code", MsgCode.set, {MsgCode.set : "set",MsgCode.get : "get",
                                                        MsgCode.arp : "arp"}),
-                   BitField("ref", 1, 8),
-#                    IntField("ref", 0),
+#                    BitField("ref", 1, 8),
+                   IntField("ref", 0),
                    IntField("vni", 1),
 #                    ByteField("code", MsgCode.set),
                    Emph(IPField("host", "0.0.0.0")),

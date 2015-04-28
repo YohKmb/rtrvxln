@@ -121,6 +121,8 @@ class PduProcessor(Process):
                             with self._lock:
                                 p_capab = [p for p in self._p_queue][:(q_p.maxlen - len(q_p) )]
                             q_p.extend(p_capab)
+                            debug_info("extended : len(p_q) = {0}".format( len(self._p_queue) ), 2)
+                            
                         break
                     
                     else:
@@ -148,6 +150,7 @@ class PduProcessor(Process):
             with self._lock:
                 self._p_queue.append(pdu)
                 
+                debug_info("len(queue) = {0}".format( len(self._p_queue) ), 2)
                 
         def be_notified(self):
             debug_info("{0} got notified !.".format(self.name), 4)
@@ -439,7 +442,7 @@ class PduProcessor(Process):
             if tout <= ts: 
                 del self.l3cache[ip_dst]
     #             self._query_remote_cache(vni, pdu)
-                vni, vtep, hwaddr, tout = (None, ActionCode.arp, None)
+                vni, vtep, hwaddr, tout = (None, ActionCode.arp, None, None)
 #                 tout = 0.0
             
             elif tout <= ts + PduProcessor.INTERVAL_REFRESH:
@@ -468,6 +471,7 @@ class PduProcessor(Process):
             msg = L3CacheMsg(rep)
             
             msg.show()
+            debug_info("msg.ref = {0}, ref = {1}".format(msg.ref, ref), 1)
 #             if msg.code != MsgCode.arp and msg.ref == ref:
             if msg.code == MsgCode.set and msg.ref == ref:
                 cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
