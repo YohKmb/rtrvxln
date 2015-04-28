@@ -121,7 +121,7 @@ class PduProcessor(Process):
                             with self._lock:
                                 p_capab = [p for p in self._p_queue][:(q_p.maxlen - len(q_p) )]
                             q_p.extend(p_capab)
-                            debug_info("extended : len(p_q) = {0}".format( len(self._p_queue) ), 2)
+                            debug_info("extended : len(p_q) = {0}".format( len(self._p_queue) ), 3)
                             
                         break
                     
@@ -160,7 +160,7 @@ class PduProcessor(Process):
         def _arp_request(self):
             
             for vtep, dport in self._vteps:
-                debug_info("sendto : {0}".format( (str(vtep), dport) ), 1)
+#                 debug_info("sendto : {0}".format( (str(vtep), dport) ), 1)
                 self._parent.sock.sendto(str(self._req_arp), (str(vtep), dport) )
  
         def halt(self):
@@ -277,12 +277,14 @@ class PduProcessor(Process):
             #                 sub_mtched = smallest_matching_cidr(pdu[IP_Stop].dst, cidrs)
             #             print "Pid = " + str(current_process().pid) + " took timestamp of " + msg
                     except EOFError as _excpt:
-                        debug_info("[%s] : Its connection was closed." % current_process().name, 2)
+                        debug_info("[{0}] : Its connection was closed.".format(current_process().name) \
+                                   , 2)
                         break
                     
                     except KeyboardInterrupt as _excpt:
                         print ""
-                        debug_info("[%s] : Interrupt was detected." % current_process().name, 3)
+                        debug_info("[{0}] : Interrupt was detected.".format(current_process().name) \
+                                   , 3)
                         break
                     
                     except Exception as excpt:
@@ -450,7 +452,7 @@ class PduProcessor(Process):
 #                 ts = ts + TIMEOUT_L3CACHE
 #                 self.l3cache[(vni, pdu[IP_Stop].dst)] = (vtep, ts)
         # a valid local cache was found
-        debug_info("The result of cache looking up : {0}".format((vni, vtep, hwaddr, tout) ), 2)
+#         debug_info("The result of cache looking up : {0}".format((vni, vtep, hwaddr, tout) ), 2)
         return (vni, vtep, hwaddr, tout)
 
 
@@ -470,8 +472,8 @@ class PduProcessor(Process):
             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
             msg = L3CacheMsg(rep)
             
-            msg.show()
-            debug_info("msg.ref = {0}, ref = {1}".format(msg.ref, ref), 1)
+#             msg.show()
+#             debug_info("msg.ref = {0}, ref = {1}".format(msg.ref, ref), 1)
 #             if msg.code != MsgCode.arp and msg.ref == ref:
             if msg.code == MsgCode.set and msg.ref == ref:
                 cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
@@ -569,7 +571,7 @@ class L3CacheServer(Process):
 #         if msg.host in self.l3cache
         code = MsgCode.set
         vni, vtep, hwaddr, tout = self.l3cache[msg.host]
-        debug_info("{0}".format((vni, vtep, hwaddr, tout)), 2)
+#         debug_info("{0}".format((vni, vtep, hwaddr, tout)), 2)
         
         
         if tout <= time.time():
@@ -668,7 +670,7 @@ def server_loop(srcip, lport, cache, maps):
                 sys.exit(1)
                 
     except socket.error as excpt:
-        print(excpt)
+        trace_exception(excpt)
         sys.exit(1)
 
 
