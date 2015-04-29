@@ -143,6 +143,14 @@ class PduProcessor(Process):
                     else:
                         debug_info("arp wait ends due to timeout.", 3)
                         break
+            
+            ip_dst =self._req_arp[ARP].pdst        
+            del self._parent._arpers[ip_dst]
+#             debug_info("{0} is going to halt. : ip[{1}] is_deleted_from_arper = {2}".format( \
+#                                                         current_process().name, \
+#                                                         ip_dst,
+#                                                         ip_dst not in self._parent._arpers.keys() ), \
+#                                                         3)
                         
 
         def append_pdu(self, pdu):
@@ -166,6 +174,11 @@ class PduProcessor(Process):
         def halt(self):
             self._is_cancelled = True
             self._evnt.set()
+            
+            
+#         def _delfrom_arpers_dict(self):
+#             del self._parent._arpers[self._req_arp]
+#             pass
 
 
     def __init__(self, pipes, maps):
