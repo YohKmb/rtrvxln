@@ -1,5 +1,5 @@
 #
-# vxlrtr packet library module
+# rtr_main packet library module
 #
 
 from scapy.fields import ByteField, BitField, IPField, \

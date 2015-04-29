@@ -1,5 +1,5 @@
 #
-# vxlrtr code library module
+# rtr_main code library module
 #
 
 from enum import IntEnum

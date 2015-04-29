@@ -1,5 +1,5 @@
 #
-# vxlrtr utility module
+# rtr_main utility module
 #
 from collections import deque
 
