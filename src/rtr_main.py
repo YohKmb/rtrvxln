@@ -13,6 +13,8 @@ from multiprocessing import Process, Pipe, cpu_count, current_process
 from threading import Thread, Event, Lock
 # from Queue import Queue, Full
 
+import redis
+
 from collections import deque, defaultdict
 # from enum import IntEnum
 import time
@@ -33,6 +35,8 @@ from scapy.layers.inet import icmptypes, Raw
 from scapy.data import ETHER_TYPES
 from scapy.arch import get_if_hwaddr, linux
 from random import randint
+from itertools import chain
+from pip._vendor.distlib.util import socket_timeout
 
 # from scapy.arch.linux import get_if_list
 # from ryu.app.rest_router import ICMP
@@ -67,7 +71,9 @@ def _ondel_handler(thrd):
 
 class PduProcessor(Process):
     
-    TIMEOUT_L3CACHE = 300
+#     TIMEOUT_L3CACHE = 300
+    TIMEOUT_L3CACHE = 100
+    TIMEOUT_L3CACHE_REMOTE = 300
     TIMEOUT_RECV_CACHE = 0.05
     INTERVAL_REFRESH = 50
     
@@ -181,7 +187,7 @@ class PduProcessor(Process):
 #             pass
 
 
-    def __init__(self, pipes, maps):
+    def __init__(self, pipes, maps): #, port_rds):
 
         super(PduProcessor, self).__init__()
         
@@ -189,8 +195,13 @@ class PduProcessor(Process):
         self.pipes = pipes
         self.maps = maps
         
+        port_rds = 6379
+        self.rds = redis.StrictRedis(host="localhost", port=port_rds, \
+                                     socket_timeout=0.5)
+        
 #         self.l3cache = {}
-        self.l3cache = defaultdict(lambda: (None, None, None, None))
+        self.l3cache = defaultdict(lambda: {"vni":None, "vtep":None, \
+                                            "hwaddr":None, "tout":None})
         
         self._p_queue = FifoQueue([], PduProcessor.LEN_PQUEUE)
         self._lock = Lock()
@@ -256,7 +267,10 @@ class PduProcessor(Process):
     #                             ip_src, hw_src = pdu[ARP_Stop].psrc, pdu[ARP_Stop].hwsrc
                                 if not ip_src in self.l3cache:
 #                                     debug_info("arper is going to be notified.", 4)
-                                    self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
+                                    self._regist_l3cache(ip_host=ip_src, vni=vni_in, \
+                                                         hwaddr=hw_src, endp_ip=endp_ip)
+                                    # _regist_l3cache(self, ip_host, vni, endp_ip, hwaddr)
+                                    
 #                                     self._cancel_wait_status(ip_src)
 #                                     debug_info("arpers = {0}".format(self._arpers), 2)
                                 if ip_src in self._arpers:
@@ -269,8 +283,8 @@ class PduProcessor(Process):
                             hw_src = pdu[Ether_Stop].src
                             
                             if not ip_src in self.l3cache:
-                                self._regist_l3cache(vni_in, ip_src, hw_src, endp_ip)
-                            
+                                self._regist_l3cache(ip_host=ip_src, vni=vni_in, endp_ip=endp_ip, hwaddr=hw_src)
+                                # _regist_l3cache(self, ip_host, vni, endp_ip, hwaddr)
                             
                             if ip_dst != str(map_in["gw_ip"]):
                                 
@@ -314,9 +328,12 @@ class PduProcessor(Process):
 
     def _route_packet(self, ip_dst, pdu):
         
-        vni_dst, vtep_dst, hwaddr, _tout = self._lookup_l3cache(ip_dst)
+        cache = self._lookup_l3cache(ip_dst)
+        debug_info("cache = {0}".format(cache), 2)
+#         vni_dst, vtep_dst, hwaddr, _tout = self._lookup_l3cache(ip_dst)
+        vtep_dst = cache["vtep"]
         
-        if vtep_dst in ActionCode:
+        if cache["vtep"] in ActionCode:
 #         if vtep_dst == ActionCode.arp:
             if vtep_dst == ActionCode.arp:
                 shdo_arp = True
@@ -340,9 +357,9 @@ class PduProcessor(Process):
             """
             debug_info("packet forwarding works.", 3)
             
-            map_out = self.maps[vni_dst]
-            pdu[Vxlan].vni = vni_dst
-            pdu[Ether_Stop].dst = hwaddr
+            map_out = self.maps[int(cache["vni"])]
+            pdu[Vxlan].vni = int(cache["vni"])
+            pdu[Ether_Stop].dst = cache["hwaddr"]
             pdu[Ether_Stop].src = map_out["hwaddr"]
             
             self.sock.sendto(str(pdu), (vtep_dst, map_out["vteps"][vtep_dst]) )
@@ -407,16 +424,28 @@ class PduProcessor(Process):
 
 #         pass
 
-    def _regist_l3cache(self, vni, host, hwaddr, endp_ip):
-#         vni_c, host_c, tout_c = self.l3cache[host]
+    def _regist_l3cache(self, ip_host, vni, endp_ip, hwaddr):
+#         vni_c, host_c, tout_c = self.l3cache[ip_host]
         tout = time.time() + PduProcessor.TIMEOUT_L3CACHE
-        self.l3cache[host] = (int(vni), endp_ip, hwaddr, tout) 
-#         self.l3cache[(int(vni), host)] = (endp_ip, tout)
-
-        msg = L3CacheMsg(code=MsgCode.set, vni=int(vni), host=host, \
-                            hwaddr=hwaddr, vtep=endp_ip, timeout=tout)
+        cache = {"vni":int(vni), "vtep":endp_ip, "hwaddr":hwaddr} #, "tout":tout}
         
-        self.sock.sendto(str(msg), ('127.0.0.1', PORT_BIND_CACHE) )
+        try:
+            pipe = self.rds.pipeline()
+            pipe.hmset(ip_host, cache)
+            pipe.expire(ip_host, self.TIMEOUT_L3CACHE_REMOTE)
+            pipe.execute()
+        
+        except Exception as excpt:
+            trace_exception(excpt)
+
+        
+        cache["tout"] = tout
+        self.l3cache[ip_host] = cache 
+#         self.l3cache[(int(vni), ip_host)] = (endp_ip, tout)
+#         msg = L3CacheMsg(code=MsgCode.set, vni=int(vni), ip_host=ip_host, \
+#                             hwaddr=hwaddr, vtep=endp_ip, timeout=tout)
+        
+#         self.sock.sendto(str(msg), ('127.0.0.1', PORT_BIND_CACHE) )
         
         debug_info("{0} : local cache was updated : {1}".format( \
                                             current_process().name, str(self.l3cache) ), 2)
@@ -442,68 +471,95 @@ class PduProcessor(Process):
 #         f2 = lambda (vni, dic): ()
 
     def _lookup_l3cache(self, ip_dst):
-        
-        vni, vtep, hwaddr, tout = self.l3cache[ip_dst]
+#         self.l3cache = defaultdict(lambda: {"vni":None, "vtep":None, \
+#                                             "hwaddr":None, "tout":None})
+
+        #         vni, vtep, hwaddr, tout = self.l3cache[ip_dst]
+        cache = self.l3cache[ip_dst]
 #         vtep, tout = self.l3cache[(vni, pdu[IP_Stop].dst)]
-        
-        if vtep is None:
+
+        if cache["vtep"] is None:
             debug_info("{0} : No local l3cache for {1} was found.".format( \
                                                                 current_process().name, ip_dst), 1)
-            vni, vtep, hwaddr, tout = self._query_remote_cache(ip_dst)
+            cache = self._query_remote_cache(ip_dst)
         
         else:
             ts = time.time()
             
-            if tout <= ts: 
+            if cache["tout"] < ts:
                 del self.l3cache[ip_dst]
-    #             self._query_remote_cache(vni, pdu)
-                vni, vtep, hwaddr, tout = (None, ActionCode.arp, None, None)
-#                 tout = 0.0
+                self._lookup_l3cache(ip_dst)
+                
+#                 cache = self._query_remote_cache(ip_dst)
+#                 
+#                 if cache["vtep"] is None:
+#                     del self.l3cache[ip_dst]
+#                     cache = {"vni":None, "vtep":ActionCode.arp, \
+#                          "hwaddr":None, "tout":None}
+#                 
+#                 else:
+#                     self.l3cache[ip_dst] = cache
+# #                 tout = 0.0
             
-            elif tout <= ts + PduProcessor.INTERVAL_REFRESH:
-                self._regist_l3cache(vni, ip_dst, hwaddr, vtep)
+#             elif tout <= ts + PduProcessor.INTERVAL_REFRESH:
+#                 self._regist_l3cache(vni, ip_dst, hwaddr, vtep)
 #                 ts = ts + TIMEOUT_L3CACHE
 #                 self.l3cache[(vni, pdu[IP_Stop].dst)] = (vtep, ts)
         # a valid local cache was found
 #         debug_info("The result of cache looking up : {0}".format((vni, vtep, hwaddr, tout) ), 2)
-        return (vni, vtep, hwaddr, tout)
+        return cache
 
 
     def _query_remote_cache(self, ip_dst):
+        # (-1, "0.0.0.0", "ff:ff:ff:ff:ff:ff", 0.0)
         
-        ref = randint(1, MAX_REFID)
-        req = L3CacheMsg(code=MsgCode.get, ref=ref, host=ip_dst)
+#         ref = randint(1, MAX_REFID)
+#         req = L3CacheMsg(code=MsgCode.get, ref=ref, host=ip_dst)
 #         req = L3CacheMsg(code=MsgCode.get, ref=ref, vni=vni, host=ip_dst)
-        
-        cache = (None, ActionCode.arp, None, None)
-#         cache = None
+#         cache = {}
         try:
-            self.sock.sendto(str(req), ("", PORT_BIND_CACHE))
-#             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
-
-            self.sock.settimeout(PduProcessor.TIMEOUT_RECV_CACHE)
-            rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
-            msg = L3CacheMsg(rep)
-            
-#             msg.show()
-#             debug_info("msg.ref = {0}, ref = {1}".format(msg.ref, ref), 1)
-#             if msg.code != MsgCode.arp and msg.ref == ref:
-            if msg.code == MsgCode.set and msg.ref == ref:
-                cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
-            
-            elif msg.code == MsgCode.wait and msg.ref == ref:
-                cache = (msg.vni, ActionCode.wait, msg.hwaddr, msg.timeout)
-            
-            else:
-                debug_info("{0} : No remote cache for {1} was found. " \
-                           "Fallback to ARP resolution.".format(current_process().name, ip_dst), 2)
-
-
+            cache = self.rds.hgetall(ip_dst)
+        
         except socket.timeout as excpt:
-            print excpt
-            debug_info("Socket timeout occurred. Fallback to ARP resolution.", 2)
-#             cache = (ActionCode.arp, None)
+            trace_exception(excpt)
+            cache = {"vni":-1, "vtep":ActionCode.arp, \
+                     "hwaddr":"ff:ff:ff:ff:ff:ff", "tout":0.0}
+        
+        if not len(cache):
+            debug_info("{0} : No remote cache for {1} was found.\n" \
+                        "Fallback to ARP resolution.".format(current_process().name, ip_dst), 2)
+            cache = {"vni":-1, "vtep":ActionCode.arp, \
+                     "hwaddr":"ff:ff:ff:ff:ff:ff", "tout":0.0}
+        
         return cache
+#         cache = None
+#         try:
+#             self.sock.sendto(str(req), ("", PORT_BIND_CACHE))
+# #             self.sock.sendto(str(req), ("127.0.0.1", PORT_BIND_CACHE))
+# 
+#             self.sock.settimeout(PduProcessor.TIMEOUT_RECV_CACHE)
+#             rep, _server = self.sock.recvfrom(LEN_MSGSTRUCT)
+#             msg = L3CacheMsg(rep)
+#             
+# #             msg.show()
+# #             debug_info("msg.ref = {0}, ref = {1}".format(msg.ref, ref), 1)
+# #             if msg.code != MsgCode.arp and msg.ref == ref:
+#             if msg.code == MsgCode.set and msg.ref == ref:
+#                 cache = (msg.vni, msg.vtep, msg.hwaddr, msg.timeout)
+#             
+#             elif msg.code == MsgCode.wait and msg.ref == ref:
+#                 cache = (msg.vni, ActionCode.wait, msg.hwaddr, msg.timeout)
+#             
+#             else:
+#                 debug_info("{0} : No remote cache for {1} was found. " \
+#                            "Fallback to ARP resolution.".format(current_process().name, ip_dst), 2)
+# 
+# 
+#         except socket.timeout as excpt:
+#             print excpt
+#             debug_info("Socket timeout occurred. Fallback to ARP resolution.", 2)
+# #             cache = (ActionCode.arp, None)
+#         return cache
 
 
 class L3CacheServer(Process):
@@ -649,8 +705,8 @@ def server_loop(srcip, lport, cache, maps):
                     p.start()
                     conn_q[c][0].close()
                 
-                srv_cache = L3CacheServer(cache)
-                srv_cache.start()
+#                 srv_cache = L3CacheServer(cache)
+#                 srv_cache.start()
             
             except Exception as excpt:
                 print(excpt)
